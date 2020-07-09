@@ -1,0 +1,311 @@
+#!/bin/sh
+
+source /lib/functions.sh #包含工具脚本
+config_load mnnu #载入全部配置到内存
+
+
+readonly LOG_FILE="/var/log/mnnu.log" #日志文件路径
+readonly LOG_FILE_MAX_SIZE_BYTE=10240 #日志文件最大字节数
+LOG_LEVEL=2 #Debug1,Info2,Warn3,Error4,Fatal5,日志级别级别越大显示越少
+config_get LOG_LEVEL 'setting' 'loglevel'
+
+echo "↑↑↑ 日志级别: $LOG_LEVEL, 每次脚本开始前将清空旧日志 ↑↑↑">$LOG_FILE   
+exec >>$LOG_FILE 2>&1  #如果执行过程中有错误信息均输出到日志文件中 
+
+readonly LOGIN_ADDRESS='http://10.254.1.12/eportal/InterFace.do?method=login'
+readonly LOGOUT_ADDRESS='http://10.254.1.12/eportal/InterFace.do?method=logout'
+readonly GET_USERINDEX_ADDRESS='http://10.254.1.12/eportal/redirectortosuccess.jsp'
+readonly SERVICE='校园网未缴费用户' #还有其他服务
+
+
+function mnnuLog(){
+
+  if [ 2 -gt $#  ]
+  then
+      return 1 # 参数个数错误
+  fi
+  
+  local level 
+  case $1 in 
+         Debug) 
+           level=1 
+         ;; 
+         Info) 
+           level=2 
+         ;;
+         Warn) 
+           level=3 
+         ;; 
+         Error) 
+           level=4 
+         ;; 
+         Fatal) 
+           level=5 
+         ;;
+         *) 
+           level=0 
+         ;; 
+  esac 
+  
+  if [ $level -lt $LOG_LEVEL ]
+  then
+    return 2 #级别大于设定的值,不进行日志记录
+  fi
+  
+  if [ ! -f "$LOG_FILE" ]
+  then
+    touch $LOG_FILE #创建文件
+  fi
+   
+  local curtime;
+  curtime=$(date +"%Y年%m月%d日 %H:%M:%S")
+   
+  #判断文件大小
+  #local cursize ;
+  #cursize=`cat $LOG_FILE | wc -c` ;
+  #if [ $cursize -gt $LOG_FILE_MAX_SIZE_BYTE ]
+  #then
+  #  echo "日志文件超过最大字节数: $LOG_FILE_MAX_SIZE_BYTE, 已清空旧日志!">$LOG_FILE #清空日志
+  #fi 
+  
+  #写入文件第一行,即逆序输入
+  sed  -i "1 i\ 【$curtime】【$1】: $2 \n" $LOG_FILE
+  return 0
+}
+
+function urlEnCode(){
+echo "$1" | awk -F "" 'BEGIN{split("35,36,37,38,43,61,63,64",ExcStr,",");for(i in ExcStr)ExcString[sprintf("%c",ExcStr[i])]=1; for (i=0;i<=255;i++) a[sprintf("%c",i)]=i ;}{for(ii=1;ii<=NF;ii++){if(a[$ii]>=33 && a[$ii]<=126 && ExcString[$ii]!=1){printf "%c",a[$ii]}else{printf "%%%X",a[$ii]};}}'
+return 0
+}
+
+function commit(){
+    uci commit
+    #/etc/init.d/mwan3 reload
+    #/etc/init.d/network restart   
+}
+
+function authenticate(){
+
+	local section=$1
+	local enable=$2
+	local username=$3
+	local password=$4
+	local interface=$5
+	local mwan3interface=$6
+	local userIndex=$7
+    local message=$8
+	
+
+	mnnuLog "Debug" "帐号信息 { ID : $section, 状态 : $enable, 用户名 : $username, 密码 : $password, WAN接口 : $interface, MWAN3接口 : $mwan3interface, 上次操作结果 : $message, 下线钥匙 : $userIndex }"
+    
+    mnnuLog "Info" "ID : $section, 检验账户数据完整性!"
+	if [ -z "$username" -o -z "$password" -o -z  "$interface" -o  -z "$mwan3interface" ]
+	then
+        mnnuLog "Warn" "ID: $section, 检验失败, 必要数据不完整!"    
+		uci set mnnu."$section".message="必要数据不完整, 请填写完整!"  
+		return 1
+	fi
+    	
+	if [ $enable -eq 1 ]
+	then
+        mnnuLog "Info" "ID: $section, 准备执行认证操作!"
+        
+        mnnuLog "Debug" "ID : $section, 访问百度, 测试是否已经过认证!"
+		returnData=$(curl -s --interface "$interface" http://baidu.com) #returnData 不能用local修饰,不然无法获取curlCode
+        
+        local curlCode=$?      
+        if [ "$curlCode" -ne 0 ] 
+		then
+	   		mnnuLog "Error" "ID: $section, $interface接口断线或网线未连接, CURL错误码: $curlCode!"
+			uci set mnnu."$section".message="$interface接口断线或网线未连接, 请点击重启网络按钮后再次执行操作!"
+	   		return 2
+		fi
+        mnnuLog "Debug" "ID: $section, 访问百度返回数据: $returnData"
+        
+		if [ $( expr "$returnData" : ".*baidu.*" ) != 0 ] 
+		then
+            uci set mnnu."$section".enable='1'
+            uci set network."$mwan3interface".multipath='on'
+            if [ -z $userIndex ] # 查看userIndex是否为空, 为空要重新获取, 也可直接重新认证
+            then
+                 #TODO 当网卡设为别帐号的, 且别帐号的网卡也在线时,会获取到别帐号的userIndex
+                mnnuLog "Debug" "ID: $section, 用户还在线, 但无下线钥匙, 正在重新获取!"
+                returnData=$(curl -s -w %{redirect_url} --interface "$interface" "$GET_USERINDEX_ADDRESS")
+                mnnuLog "Debug" "ID: $section, 获取下线钥匙返回数据: $returnData"
+                userIndex=$( expr "$returnData" : '.*userIndex=\([0-9A-z]*\).*' )
+                uci set mnnu."$section".userIndex=$userIndex
+                uci set mnnu."$section".message="用户还在线, 无需重新认证, 但无下线钥匙, 已重新获取!"
+                return 3 
+            fi  
+	   		mnnuLog "Info" "ID: $section, 用户还在线, 无需重新认证!"
+			uci set mnnu."$section".message="用户还在线, 无需重新认证!"                             
+            return 4	   		
+		fi
+        
+ 
+        local authenticatePageAddress=$( expr "$returnData" : ".*'\(.*\)'.*" )
+		mnnuLog "Debug" "ID: $section, 访问百度失败, 提取认证页面地址: $authenticatePageAddress"
+
+		local queryString=$( expr "$authenticatePageAddress" : ".*?\(.*\)" )
+		mnnuLog "Debug" "ID: $section, 提取认证页面查询参数: $queryString"	
+
+		local serviceEncode1=$(urlEnCode "$SERVICE")
+		local serviceEncode2=$(urlEnCode "$serviceEncode1")
+
+		local queryStringEncode1=$(urlEnCode "$queryString")
+		local queryStringEncode2=$(urlEnCode "$queryStringEncode1")
+
+		local loginData="userId=$username&password=$password&service=$serviceEncode2&queryString=$queryStringEncode2&operatorPwd=&operatorUserId=&validcode=&passwordEncrypt=false"	
+		mnnuLog "Debug" "ID: $section, 将参数编码到认证数据中: $loginData"
+		
+		mnnuLog "Info" "ID: $section, 认证中..."
+		returnData=$(curl -s --interface "$interface" -d "$loginData" $LOGIN_ADDRESS)
+    	mnnuLog "Debug" "ID: $section, 认证返回信息: $returnData"
+		
+		local result=$( expr "$returnData" : '.*"result":"\([A-z]*\)".*' )
+		if [ "$result" != 'success' ]
+		then  
+			uci set mnnu."$section".enable='0'
+            #uci set mwan3."$mwan3interface".enabled='0'
+            uci set network."$mwan3interface".multipath='off'
+            message=$( expr "$returnData" : '.*"message":"\(.*\)","forwordurl".*' )
+            mnnuLog "Warn" "ID: $section, $message"
+            uci set mnnu."$section".message="$message"
+            return 5
+        else                        
+            userIndex=$( expr "$returnData" : '.*"userIndex":"\([0-9A-z]*\)".*' )
+			uci set mnnu."$section".userIndex=$userIndex
+            uci set mnnu."$section".enable='1'
+			#uci set mwan3."$mwan3interface".enabled='1'
+            uci set network."$mwan3interface".multipath='on'
+            message='认证成功!'
+            mnnuLog "Info" "ID: $section, 认证成功!"
+            uci set mnnu."$section".message="$message"
+		fi       
+        return 0
+	else
+        mnnuLog "Info" "ID: $section, 准备执行下线操作!"
+        
+		if [ -z "$userIndex" ]
+		then
+            mnnuLog "Info" "ID: $section, 用户未经认证, 无需下线, 请重新认证后再下线!"
+            
+			message='用户未经认证, 无需下线, 请重新认证后再下线!'
+            uci set mnnu."$section".enable='0'
+            #uci set mwan3."$mwan3interface".enabled='0'
+            uci set network."$mwan3interface".multipath='off'
+            uci set mnnu."$section".message="$message"
+            return 6
+		else          
+            mnnuLog "Info" "ID: $section, 下线中..."
+            
+			local logoutData="userIndex=$userIndex"
+			mnnuLog "Debug" "ID: $section, 拼接下线参数: $logoutData"
+			
+			returnData=$(curl -s --interface "$interface" -d "$logoutData" $LOGOUT_ADDRESS)
+			mnnuLog "Debug" "ID: $section, 下线返回信息: $returnData"
+                        
+			message=$( expr "$returnData" : '.*"message":"\(.*\)".*' )
+			uci del mnnu."$section".userIndex
+            mnnuLog "Info" "ID: $section, $message"
+            uci set mnnu."$section".enable='0'
+            #uci set mwan3."$mwan3interface".enabled='0'
+            uci set network."$mwan3interface".multipath='off'
+            uci set mnnu."$section".message="$message"
+		fi        
+        return 0
+	fi			
+}
+
+function doAuthenticate(){
+    local section=$1
+	local enable=$2
+	local username
+	local password
+	local interface
+	local mwan3interface
+	local userIndex
+    local message
+	
+    mnnuLog "Info" "ID : $section, 读取账户信息!" 
+    if [ -z "$enable" ]
+    then
+        config_get enable $section enable
+    fi
+	config_get username $section username
+	config_get password $section password
+	config_get interface $section interface
+	config_get mwan3interface $section mwan3interface
+	config_get userIndex $section userIndex
+    config_get message $section message
+    
+    authenticate "$section" "$enable" "$username" "$password" "$interface" "$mwan3interface" "$userIndex" "$message"
+    return 0
+}
+
+function enable(){
+    local section=$1
+	local enable='1'
+	doAuthenticate "$section" "$enable"
+    return 0
+}
+
+function disable(){
+    local section=$1
+	local enable='0'
+	doAuthenticate "$section" "$enable"
+    return 0
+}
+
+function enableOrDisable(){
+	local section=$1
+	local enable
+	doAuthenticate "$section" "$enable"
+    return 0
+}
+
+function allEnable(){
+    config_foreach enable user
+    return 0
+}
+
+function allDisable(){
+    config_foreach disable user
+    return 0    
+}
+
+function multiOperation(){
+	config_foreach enableOrDisable user  #遍历类型为user的section,section名作为第一个参数传给enableOrDisable
+    return 0
+}
+
+operation=$1
+section=$2
+case "$operation" in
+        "enable")
+                mnnuLog "Debug" "执行上线操作!"
+                enable "$section"
+                ;;
+        "disable")
+                mnnuLog "Debug" "执行下线操作!"
+                disable "$section"
+                ;;
+        "allEnable")
+                mnnuLog "Debug" "全部上线!"
+                allEnable
+                ;;
+        "allDisable")
+                mnnuLog "Debug" "全部下线!"
+                allDisable
+                ;;
+        "multiOperation")
+                mnnuLog "Debug" "批量操作!"
+                multiOperation
+                ;;
+        *)
+                #其它输入
+                mnnuLog "Fatal" "没有该方法!"
+                ;;
+esac
+commit
+return 0

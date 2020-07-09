@@ -1,0 +1,2 @@
+config global 'setting'
+	option loglevel '1'

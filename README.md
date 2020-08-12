@@ -4,9 +4,9 @@
 
 本软件是闽南师大校园网认证的 LuCI 控制界面. 由于认证脚本不大, 直接将其也一起打包了.
 
-![](https://raw.githubusercontent.com/JuchiaLu/luci-app-mnnu/master/images/admin_network_mnnu.png)
+![](http://47.107.243.187:9530/luci-app-mnnu/images/admin_network_mnnu.png)
 
-![](https://raw.githubusercontent.com/JuchiaLu/luci-app-mnnu/master/images/admin_system_openmptcprouter_status.png)
+![](http://47.107.243.187:9530/luci-app-mnnu/images/admin_system_openmptcprouter_status.png)
 
 ## (二) 原理
 
@@ -18,7 +18,7 @@
 
 具体原理就是将数据包分片后通过mptcp协议将分片均衡的分发到多条链路(多个IP)上, 服务器接收到这些分片后重新还原成数据包, 然后服务器作为一个代理将数据包转发到目标网站, OpenMptcpRouter具体原理如官网图所示
 
-![](https://raw.githubusercontent.com/JuchiaLu/luci-app-mnnu/master/images/openmptcprouter.svg)
+![](http://47.107.243.187:9530/luci-app-mnnu/images/openmptcprouter.svg)
 
 而我们只需根据需求, 虚拟多张网卡, 这样便能获取到多个IP, 如每个IP限速160KB, 4个IP共640KB就能看1080P在线视频了,  但校园网需要认证过后才能上网, 学校用的是锐捷的网页认证, 本程序实现了锐捷的认证协议, 只需要填写帐号密码, 便可以自动完成各个接口的认证, 同时会自动配置OpenMptcpRouter的一些配置.
 
